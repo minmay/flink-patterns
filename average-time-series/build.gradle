@@ -19,6 +19,7 @@ ext {
     scalaBinaryVersion = '2.12'
     slf4jVersion = '1.7.7'
     log4jVersion = '1.2.17'
+    picocliVersion = '4.3.2'
 }
 
 dependencyManagement {
@@ -34,6 +35,8 @@ dependencyManagement {
         dependency "org.apache.flink:flink-table-planner-blink_${scalaBinaryVersion}:${flinkVersion}"
         dependency "org.apache.flink:flink-jdbc_${scalaBinaryVersion}:${flinkVersion}"
         dependency 'com.google.guava:guava:23.0'
+        dependency "info.picocli:picocli:${picocliVersion}"
+        dependency "info.picocli:picocli-codegen:${picocliVersion}"
     }
 }
 
@@ -50,9 +53,12 @@ dependencies {
 
     implementation 'com.google.guava:guava'
     implementation 'org.apache.derby:derby'
+    implementation "info.picocli:picocli"
 
     testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine'
     testImplementation 'org.junit.jupiter:junit-jupiter-api'
+
+    annotationProcessor "info.picocli:picocli-codegen"
 }
 
 test {
@@ -64,5 +70,5 @@ application {
 }
 
 run {
-    args = [file('timeseries.csv')]
+    args = ["--input-file", file('timeseries.csv')]
 }

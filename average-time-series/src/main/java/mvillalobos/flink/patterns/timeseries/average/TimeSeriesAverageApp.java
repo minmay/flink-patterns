@@ -23,18 +23,31 @@ import org.apache.flink.types.Row;
 import org.apache.flink.util.Collector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import picocli.CommandLine;
 
+import java.io.File;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.Instant;
-import java.util.Arrays;
+import java.util.concurrent.Callable;
 
-public class TimeSeriesAverageApp {
+@CommandLine.Command(name = "Time Series Average", mixinStandardHelpOptions = true,
+        description = "Compute the average of the time series with a 15 minute tumbling event time window and upsert the results into an Apache Derby database.")
+public class TimeSeriesAverageApp implements Callable<Integer> {
 
     private final static Logger logger = LoggerFactory.getLogger(TimeSeriesAverageApp.class);
+
+    @CommandLine.Option(names = {"-f", "--input-file"}, description = "The CSV input file of time series data. Each line must be in the format: String, double, Instant.")
+    private File inputFile;
+
+    @Override
+    public Integer call() throws Exception {
+        stream(inputFile.toString());
+        return 0;
+    }
 
     public void stream(String inputFilePath) throws Exception {
 
@@ -63,6 +76,7 @@ public class TimeSeriesAverageApp {
                     final Instant timestamp = Instant.parse(split[2]);
                     return Tuple7.of(name, 1, value, timestamp, value, 1, false);
                 }).returns(Types.TUPLE(Types.STRING, Types.INT, Types.DOUBLE, TypeInformation.of(Instant.class), Types.DOUBLE, Types.INT, Types.BOOLEAN))
+                .name("time series stream")
                 .assignTimestampsAndWatermarks(
                         new AscendingTimestampExtractor<>() {
                             @Override
@@ -133,7 +147,7 @@ public class TimeSeriesAverageApp {
 
                         out.collect(aggregation);
                     }
-                });
+                }).name("averaged keyed tumbling window event time stream");
 
         upsertToJDBC(jdbcUpsertTableSink, aggregateTimeSeriesStream);
 
@@ -173,15 +187,13 @@ public class TimeSeriesAverageApp {
             row.setField(6, t.f6);
             return new Tuple2<>(true, row);
         }).returns(new TypeHint<Tuple2<Boolean, Row>>() {
-        }));
+        })).name("upsert to JDBC");
     }
 
     public static void main(String[] args) throws Exception {
-        logger.info("Command line arguments: {}", Arrays.toString(args));
-        final String inputFilePath = args[0];
-        logger.info("Reading input file: {}", inputFilePath);
 
         final String databaseURL = "jdbc:derby:memory:flink;create=true";
+        int exitCode;
         try (final Connection con = DriverManager.getConnection(databaseURL)) {
             try (final Statement stmt = con.createStatement();) {
                 stmt.execute("CREATE TABLE time_series (\n" +
@@ -200,8 +212,7 @@ public class TimeSeriesAverageApp {
                         ")");
             }
 
-            TimeSeriesAverageApp app = new TimeSeriesAverageApp();
-            app.stream(inputFilePath);
+            exitCode = new CommandLine(new TimeSeriesAverageApp()).execute(args);
 
             try (final Statement stmt = con.createStatement()) {
                 final ResultSet rs = stmt.executeQuery("SELECT id, name, window_size, event_timestamp, value, aggregate_sum, aggregate_count, is_backfill, version, create_time, modify_time FROM time_series");
@@ -224,5 +235,7 @@ public class TimeSeriesAverageApp {
                 }
             }
         }
+
+        System.exit(exitCode);
     }
 }
