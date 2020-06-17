@@ -1,0 +1,68 @@
+plugins {
+    id 'org.springframework.boot' version '2.3.1.RELEASE' apply false
+    id 'io.spring.dependency-management' version '1.0.9.RELEASE'
+    id 'java'
+    id 'application'
+}
+
+group = 'mvillalobos.flink-patterns'
+version = '0.0.1-SNAPSHOT'
+sourceCompatibility = '11'
+
+repositories {
+    jcenter()
+}
+
+ext {
+    javaVersion = '1.8'
+    flinkVersion = '1.10.1'
+    scalaBinaryVersion = '2.12'
+    slf4jVersion = '1.7.7'
+    log4jVersion = '1.2.17'
+}
+
+dependencyManagement {
+    imports {
+        mavenBom org.springframework.boot.gradle.plugin.SpringBootPlugin.BOM_COORDINATES
+    }
+
+    dependencies {
+        dependency "org.apache.flink:flink-java:${flinkVersion}"
+        dependency "org.apache.flink:flink-streaming-java_${scalaBinaryVersion}:${flinkVersion}"
+        dependency "org.apache.flink:flink-streaming-scala_${scalaBinaryVersion}:${flinkVersion}"
+        dependency "org.apache.flink:flink-table-api-java-bridge_${scalaBinaryVersion}:${flinkVersion}"
+        dependency "org.apache.flink:flink-table-planner-blink_${scalaBinaryVersion}:${flinkVersion}"
+        dependency "org.apache.flink:flink-jdbc_${scalaBinaryVersion}:${flinkVersion}"
+        dependency 'com.google.guava:guava:23.0'
+    }
+}
+
+dependencies {
+    runtimeOnly 'org.slf4j:slf4j-log4j12'
+    runtimeOnly 'log4j:log4j'
+
+    implementation "org.apache.flink:flink-java"
+    implementation "org.apache.flink:flink-streaming-java_${scalaBinaryVersion}"
+    implementation "org.apache.flink:flink-streaming-scala_${scalaBinaryVersion}"
+    implementation "org.apache.flink:flink-table-api-java-bridge_${scalaBinaryVersion}"
+    implementation "org.apache.flink:flink-table-planner-blink_${scalaBinaryVersion}"
+    implementation "org.apache.flink:flink-jdbc_${scalaBinaryVersion}"
+
+    implementation 'com.google.guava:guava'
+    implementation 'org.apache.derby:derby'
+
+    testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine'
+    testImplementation 'org.junit.jupiter:junit-jupiter-api'
+}
+
+test {
+    useJUnitPlatform()
+}
+
+application {
+    mainClass = 'mvillalobos.flink.patterns.timeseries.average.TimeSeriesAverageApp'
+}
+
+run {
+    args = [file('timeseries.csv')]
+}
