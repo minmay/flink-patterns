@@ -11,7 +11,6 @@ import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.tuple.Tuple7;
 import org.apache.flink.streaming.api.TimeCharacteristic;
 import org.apache.flink.streaming.api.datastream.DataStream;
-import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.timestamps.AscendingTimestampExtractor;
 import org.apache.flink.streaming.api.functions.windowing.ProcessWindowFunction;
@@ -95,7 +94,7 @@ public class TimeSeriesAverageApp {
         //      f3: event_timestamp = the first epoch millisecond in this 15 minute window
         //      f4: aggregate_sum = sum of f2 values in this 15 minute window
         //      f5: aggregate_count = number of values in this 15 minute window
-        final SingleOutputStreamOperator<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>>
+        final DataStream<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>>
                 aggregateTimeSeriesStream = timeSeriesStream.keyBy(0, 1)
                 .window(TumblingEventTimeWindows.of(Time.minutes(15)))
                 .allowedLateness(Time.hours(1))
