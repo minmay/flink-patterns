@@ -1,6 +1,10 @@
 package mvillalobos.flink.patterns.timeseries.average;
 
 import com.google.common.collect.ImmutableList;
+import org.apache.flink.api.common.state.MapState;
+import org.apache.flink.api.common.state.MapStateDescriptor;
+import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeinfo.TypeHint;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeinfo.Types;
@@ -9,9 +13,11 @@ import org.apache.flink.api.java.io.jdbc.JDBCUpsertTableSink;
 import org.apache.flink.api.java.tuple.Tuple;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.tuple.Tuple7;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.TimeCharacteristic;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.streaming.api.functions.timestamps.AscendingTimestampExtractor;
 import org.apache.flink.streaming.api.functions.windowing.ProcessWindowFunction;
 import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows;
@@ -32,7 +38,15 @@ import java.sql.ResultSet;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.Callable;
+import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
 
 @CommandLine.Command(name = "Time Series Average", mixinStandardHelpOptions = true,
         description = "Compute the average of the time series with a 15 minute tumbling event time window and upsert the results into an Apache Derby database.")
@@ -97,11 +111,11 @@ public class TimeSeriesAverageApp implements Callable<Integer> {
         // f3: event_timestamp: Instant
         // f4: aggregate_sum: double
         // f5: aggregate_count double
-        // f6: is_backfile: boolean
+        // f6: is_backfill: boolean
         // THEN the stream is KEYED BY: f0: name:String, f1: window_size: int
         // THEN the stream is WINDOWED into a tumbling event time window of 15 minutes
         // THEN the window is configured to allow elements late by 1 hour
-        // THEN a low-level process function is applied to the window that
+        // THEN a low-level process window function is applied to the window that
         //      aggregates the time series by assigning the following tuple fields:
         //      f1: window_size = 15 minutes in miliseconds
         //      f2: value = average value in this 15 minute window
@@ -145,11 +159,170 @@ public class TimeSeriesAverageApp implements Callable<Integer> {
                             aggregation.f2 = aggregation.f4 / aggregation.f5;
                         }
 
+                        logger.info("Added aggregation: {}", aggregation);
                         out.collect(aggregation);
                     }
                 }).name("averaged keyed tumbling window event time stream");
 
-        upsertToJDBC(jdbcUpsertTableSink, aggregateTimeSeriesStream);
+
+        // GIVEN a data-stream of tuple7
+        // f0: name: String
+        // f1: window_size: int
+        // f2: value: double
+        // f3: event_timestamp: Instant
+        // f4: aggregate_sum: double
+        // f5: aggregate_count double
+        // f6: is_backfill: boolean
+        // THAT was aggregated to compute the average on f2: value: double
+        // WITH a grouping of: f0: name:String, f1: window_size: int
+        // WITH a tumbling event time window of 15 minutes
+        // THEN the stream is KEYED BY: f1: window_size: int
+        // THEN a low-level keyed process function is applied to the window that
+        //      WHEN the keyed process function opens it
+        //          initializes a VALUE STATE of TreeSet<String> called "nameSet"
+        //          initializes a MAP STATE of
+        //            KEY of Tuple2: f0: String, f1: Instant
+        //            VALUE of Tuple7:
+        //              f0: String
+        //              f1: int
+        //              f2: double
+        //              f3: Instant
+        //              f4: double
+        //              f5: double
+        //              f6: boolean
+        //            called "backfillState"
+        //      WHEN the keyed process function processes an element it
+        //          adds each f0: name: String into the VALUE STATE "nameSet"
+        //          adds each
+        //              KEY of Tuple2: f0: name: String, f3: event_timestamp: Instant
+        //              VALUE of Tuple7:
+        //                  f0: name: String
+        //                  f1: window_size: int
+        //                  f2: value: double
+        //                  f3: event_timestamp: Instant
+        //                  f4: aggregate_sum: double
+        //                  f5: aggregate_count double
+        //                  f6: is_backfill: boolean
+        //              to the MAP STATE "backfillState"
+        //          fires an timer to occur at f3: event_timestamp: Instant + 15 minutes (at the end of a window)
+        //      WHEN the keyed process functions coalesced timers are handled it
+        //          calculates the current "event_time" to handle which is the timestamp - 15 minutes
+        //          iterates over each time series name in the "nameSet" for each "name":
+        //              IF MAP STATE "backfillState" contains a KEY of Tuple2: "name", "event_time" THEN
+        //                  collect the VALUE as an OUT result because it is not a back fill
+        //              ELSE
+        //                  the KEY of Tuple2: "name", "event_time" requires a back fill
+        //                  iterate over the MAP STATE "backfillState"
+        //                      filter the by "name" = Tuple2.f0
+        //                      filter by timestamp "event_time" > Tuple2.f1
+        //                      sort by key timestamp Tuple.f1 in ascending order
+        //                      collect into a List named "backfills"
+        //                  IF "backfills" is empty THEN there is no backfill
+        //                  ELSE
+        //                      the back fill is the last value in the list
+        //                      remove the other values in the list from MAP STATE "backfillState" as they are no longer needed
+        final DataStream<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>> backfilledAggregateTimeSeriesStream =
+                aggregateTimeSeriesStream.keyBy(1)
+                        .process(
+                                new KeyedProcessFunction<>() {
+
+                                    private ValueState<Set<String>> namesState;
+
+                                    private MapState<Tuple2<String, Instant>, Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>> backfillState;
+
+                                    @Override
+                                    public void open(Configuration parameters) {
+                                        MapStateDescriptor<Tuple2<String, Instant>, Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>> backfillDescriptor =
+                                                new MapStateDescriptor<>(
+                                                        "backfill-state",
+                                                        TypeInformation.of(new TypeHint<>() {}),
+                                                        TypeInformation.of(new TypeHint<>() {})
+                                                );
+
+                                        backfillState = getRuntimeContext().getMapState(backfillDescriptor);
+
+                                        ValueStateDescriptor<Set<String>> namesDescriptor =
+                                                new ValueStateDescriptor<>("names-value-state", TypeInformation.of(new TypeHint<>() {}));
+
+                                        namesState = getRuntimeContext().getState(namesDescriptor);
+                                    }
+
+                                    @Override
+                                    public void processElement(
+                                            Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean> value,
+                                            Context ctx,
+                                            Collector<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>> out
+                                    ) throws Exception {
+
+                                        if (namesState.value() == null) {
+                                            namesState.update(new TreeSet<>());
+                                        }
+
+                                        namesState.value().add(value.f0);
+
+                                        final Instant evenTime = value.f3;
+                                        final long timer = evenTime.toEpochMilli() + Time.minutes(15).toMilliseconds();
+
+                                        logger.info(
+                                                "processElement with key: {}, value: {}.  registering timer: {}",
+                                                ctx.getCurrentKey(),
+                                                value,
+                                                Instant.ofEpochMilli(timer)
+                                        );
+                                        ctx.timerService().registerEventTimeTimer(timer);
+
+                                        final Tuple2<String, Instant> currentKey = new Tuple2<>(value.f0, value.f3);
+                                        backfillState.put(currentKey, value);
+                                    }
+
+                                    @Override
+                                    public void onTimer(
+                                            long timestamp,
+                                            OnTimerContext ctx,
+                                            Collector<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>> out
+                                    ) throws Exception {
+
+                                        final Instant event_time = Instant.ofEpochMilli(timestamp).minus(15, ChronoUnit.MINUTES);
+
+                                        for (String name : namesState.value()) {
+                                            Tuple2<String, Instant> key = new Tuple2<>(name, event_time);
+                                            if (backfillState.contains(key)) {
+                                                final Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean> value = backfillState.get(key);
+                                                logger.info(
+                                                        "onTimer with key: {} timestamp: {}, event_time: {}, has value: {}",
+                                                        ctx.getCurrentKey(),
+                                                        Instant.ofEpochMilli(timestamp),
+                                                        event_time,
+                                                        value
+                                                );
+                                                out.collect(value);
+                                            } else {
+                                                final List<Map.Entry<Tuple2<String, Instant>, Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>>> backfills
+                                                        = StreamSupport.stream(backfillState.entries().spliterator(), false)
+                                                        .filter(entry -> name.equals(entry.getKey().f0))
+                                                        .filter(entry -> event_time.isAfter(entry.getKey().f1))
+                                                        .sorted(Comparator.comparing(entry -> entry.getKey().f1))
+                                                        .collect(Collectors.toList());
+
+                                                if (!backfills.isEmpty()) {
+                                                    final Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean> value = backfills.get(backfills.size() - 1).getValue();
+                                                    final Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean> backfill = new Tuple7<>(
+                                                            value.f0, value.f1, value.f2, event_time, value.f4, value.f5, true
+                                                    );
+                                                    out.collect(backfill);
+
+                                                    for (int i = 0; i < backfills.size() - 1; i++) {
+                                                        backfillState.remove(backfills.get(i).getKey());
+                                                    }
+                                                    logger.info("onTimer with key: {} timestamp: {}, step: {}, has backfill: {}", ctx.getCurrentKey(), Instant.ofEpochMilli(timestamp), event_time, backfill);
+                                                }
+                                            }
+                                        }
+                                        logger.info("*****************");
+                                    }
+                                });
+
+        upsertToJDBC(jdbcUpsertTableSink, backfilledAggregateTimeSeriesStream);
 
         env.execute("time series");
     }
@@ -215,7 +388,7 @@ public class TimeSeriesAverageApp implements Callable<Integer> {
             exitCode = new CommandLine(new TimeSeriesAverageApp()).execute(args);
 
             try (final Statement stmt = con.createStatement()) {
-                final ResultSet rs = stmt.executeQuery("SELECT id, name, window_size, event_timestamp, value, aggregate_sum, aggregate_count, is_backfill, version, create_time, modify_time FROM time_series");
+                final ResultSet rs = stmt.executeQuery("SELECT id, name, window_size, event_timestamp, value, aggregate_sum, aggregate_count, is_backfill, version, create_time, modify_time FROM time_series ORDER BY window_size, event_timestamp, name");
                 while (rs.next()) {
                     final long id = rs.getLong(1);
                     final String name = rs.getString(2);
