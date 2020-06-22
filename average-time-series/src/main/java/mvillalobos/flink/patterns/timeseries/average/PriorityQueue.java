@@ -1,19 +1,16 @@
 package mvillalobos.flink.patterns.timeseries.average;
 
-import java.util.Comparator;
 import java.util.Optional;
 import java.util.function.Function;
 
-public class PriorityQueue<T, F> {
+public class PriorityQueue<T, F extends Comparable<F>> {
 
-    private final Function<T, F> mapToField;
-    private final Comparator<F> comparator;
+    private final Function<T, F> mapToComparable;
     private Node<T> head = null;
     private int n;
 
-    public PriorityQueue(Function<T, F> mapToField, Comparator<F> comparator) {
-        this.mapToField = mapToField;
-        this.comparator = comparator;
+    public PriorityQueue(Function<T, F> mapToComparable) {
+        this.mapToComparable = mapToComparable;
     }
 
     public void enqueue(T value) {
@@ -24,7 +21,7 @@ public class PriorityQueue<T, F> {
             Node<T> runner = head;
             Node<T> trailer = null;
             while (runner != null) {
-                if (comparator.compare(mapToField.apply(node.value), mapToField.apply(runner.value)) > 0) {
+                if (mapToComparable.apply(node.value).compareTo(mapToComparable.apply(runner.value)) > 0) {
                     if (trailer == null) {
                         head = node;
                     } else {
@@ -59,7 +56,7 @@ public class PriorityQueue<T, F> {
         int counter = 0;
         while (runner != null) {
 
-            if (comparator.compare(mapToField.apply(runner.value), value) <= 0) {
+            if (mapToComparable.apply(runner.value).compareTo(value) <= 0) {
                 runner.next = null;
                 n -= counter;
                 return Optional.of(runner.value);

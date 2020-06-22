@@ -273,8 +273,7 @@ public class TimeSeriesAverageApp implements Callable<Integer> {
                                             adj.get(currentKey).enqueue(value);
                                         } else {
                                             PriorityQueue<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>, Instant> list = new PriorityQueue<>(
-                                                    tuple7 -> tuple7.f3,
-                                                    (first, second) -> first.compareTo(second)
+                                                    tuple7 -> tuple7.f3
                                             );
                                             list.enqueue(value);
 
