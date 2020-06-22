@@ -40,13 +40,10 @@ import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Comparator;
-import java.util.List;
-import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.Callable;
-import java.util.stream.Collectors;
-import java.util.stream.StreamSupport;
 
 @CommandLine.Command(name = "Time Series Average", mixinStandardHelpOptions = true,
         description = "Compute the average of the time series with a 15 minute tumbling event time window and upsert the results into an Apache Derby database.")
@@ -226,25 +223,25 @@ public class TimeSeriesAverageApp implements Callable<Integer> {
                         .process(
                                 new KeyedProcessFunction<>() {
 
-                                    private ValueState<Set<String>> namesState;
+                                    private ValueState<Set<String>> nameSymbolTable;
 
-                                    private MapState<Tuple2<String, Instant>, Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>> backfillState;
+                                    private MapState<String, PriorityQueue<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>, Instant>> adj;
 
                                     @Override
                                     public void open(Configuration parameters) {
-                                        MapStateDescriptor<Tuple2<String, Instant>, Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>> backfillDescriptor =
+                                        MapStateDescriptor<String, PriorityQueue<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>, Instant>> backfillDescriptor =
                                                 new MapStateDescriptor<>(
-                                                        "backfill-state",
-                                                        TypeInformation.of(new TypeHint<>() {}),
+                                                        "time-series-graph",
+                                                        TypeInformation.of(String.class),
                                                         TypeInformation.of(new TypeHint<>() {})
                                                 );
 
-                                        backfillState = getRuntimeContext().getMapState(backfillDescriptor);
+                                        adj = getRuntimeContext().getMapState(backfillDescriptor);
 
                                         ValueStateDescriptor<Set<String>> namesDescriptor =
-                                                new ValueStateDescriptor<>("names-value-state", TypeInformation.of(new TypeHint<>() {}));
+                                                new ValueStateDescriptor<>("name-symbol-table", TypeInformation.of(new TypeHint<>() {}));
 
-                                        namesState = getRuntimeContext().getState(namesDescriptor);
+                                        nameSymbolTable = getRuntimeContext().getState(namesDescriptor);
                                     }
 
                                     @Override
@@ -254,11 +251,11 @@ public class TimeSeriesAverageApp implements Callable<Integer> {
                                             Collector<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>> out
                                     ) throws Exception {
 
-                                        if (namesState.value() == null) {
-                                            namesState.update(new TreeSet<>());
+                                        if (nameSymbolTable.value() == null) {
+                                            nameSymbolTable.update(new TreeSet<>());
                                         }
 
-                                        namesState.value().add(value.f0);
+                                        nameSymbolTable.value().add(value.f0);
 
                                         final Instant evenTime = value.f3;
                                         final long timer = evenTime.toEpochMilli() + Time.minutes(15).toMilliseconds();
@@ -271,8 +268,20 @@ public class TimeSeriesAverageApp implements Callable<Integer> {
                                         );
                                         ctx.timerService().registerEventTimeTimer(timer);
 
-                                        final Tuple2<String, Instant> currentKey = new Tuple2<>(value.f0, value.f3);
-                                        backfillState.put(currentKey, value);
+                                        final String currentKey = value.f0;
+                                        if (adj.contains(currentKey)) {
+                                            adj.get(currentKey).enqueue(value);
+                                        } else {
+                                            PriorityQueue<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>, Instant> list = new PriorityQueue<>(
+                                                    tuple7 -> tuple7.f3,
+                                                    (first, second) -> first.compareTo(second)
+                                            );
+                                            list.enqueue(value);
+
+                                            adj.put(currentKey, list);
+                                        }
+
+                                        logger.info("queue: {}", adj.get(currentKey));
                                     }
 
                                     @Override
@@ -284,41 +293,43 @@ public class TimeSeriesAverageApp implements Callable<Integer> {
 
                                         final Instant event_time = Instant.ofEpochMilli(timestamp).minus(15, ChronoUnit.MINUTES);
 
-                                        for (String name : namesState.value()) {
-                                            Tuple2<String, Instant> key = new Tuple2<>(name, event_time);
-                                            if (backfillState.contains(key)) {
-                                                final Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean> value = backfillState.get(key);
-                                                logger.info(
-                                                        "onTimer with key: {} timestamp: {}, event_time: {}, has value: {}",
-                                                        ctx.getCurrentKey(),
-                                                        Instant.ofEpochMilli(timestamp),
-                                                        event_time,
-                                                        value
-                                                );
-                                                out.collect(value);
-                                            } else {
-                                                final List<Map.Entry<Tuple2<String, Instant>, Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>>> backfills
-                                                        = StreamSupport.stream(backfillState.entries().spliterator(), false)
-                                                        .filter(entry -> name.equals(entry.getKey().f0))
-                                                        .filter(entry -> event_time.isAfter(entry.getKey().f1))
-                                                        .sorted(Comparator.comparing(entry -> entry.getKey().f1))
-                                                        .collect(Collectors.toList());
+                                        for (String name : nameSymbolTable.value()) {
 
-                                                if (!backfills.isEmpty()) {
-                                                    final Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean> value = backfills.get(backfills.size() - 1).getValue();
-                                                    final Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean> backfill = new Tuple7<>(
-                                                            value.f0, value.f1, value.f2, event_time, value.f4, value.f5, true
+                                            if (adj.contains(name)) {
+                                                final PriorityQueue<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>, Instant> list = adj.get(name);
+                                                logger.info("search event_time: {}, list: {}", event_time, list);
+                                                final Optional<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>> value =
+                                                        list.findThenTruncate(event_time); //, ((tuple7, instant) -> tuple7.f3.compareTo(instant) <= 0)
+                                                logger.info("search result event_time: {}, value: {}, list: {}", event_time, value, list);
+                                                if (value.isEmpty()) {
+                                                    logger.info(
+                                                            "onTimer with key: {} timestamp: {}, event_time: {}, has no value for name: {}.",
+                                                            ctx.getCurrentKey(),
+                                                            Instant.ofEpochMilli(timestamp),
+                                                            event_time,
+                                                            name
                                                     );
-                                                    out.collect(backfill);
-
-                                                    for (int i = 0; i < backfills.size() - 1; i++) {
-                                                        backfillState.remove(backfills.get(i).getKey());
+                                                } else {
+                                                    final Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean> candidate = value.get();
+                                                    if (candidate.f3.equals(event_time)) {
+                                                        logger.info(
+                                                                "onTimer with key: {} timestamp: {}, event_time: {}, has value: {}",
+                                                                ctx.getCurrentKey(),
+                                                                Instant.ofEpochMilli(timestamp),
+                                                                event_time,
+                                                                value
+                                                        );
+                                                        out.collect(candidate);
+                                                    } else {
+                                                        final Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean> backfill = new Tuple7<>(
+                                                                candidate.f0, candidate.f1, candidate.f2, event_time, candidate.f4, candidate.f5, true
+                                                        );
+                                                        logger.info("onTimer with key: {} timestamp: {}, step: {}, has backfill: {}", ctx.getCurrentKey(), Instant.ofEpochMilli(timestamp), event_time, backfill);
+                                                        out.collect(backfill);
                                                     }
-                                                    logger.info("onTimer with key: {} timestamp: {}, step: {}, has backfill: {}", ctx.getCurrentKey(), Instant.ofEpochMilli(timestamp), event_time, backfill);
                                                 }
                                             }
                                         }
-                                        logger.info("*****************");
                                     }
                                 });
 
