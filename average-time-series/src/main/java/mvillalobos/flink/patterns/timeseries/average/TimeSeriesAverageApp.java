@@ -39,8 +39,6 @@ import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
-import java.util.Comparator;
-import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.Callable;
@@ -176,10 +174,10 @@ public class TimeSeriesAverageApp implements Callable<Integer> {
         // THEN the stream is KEYED BY: f1: window_size: int
         // THEN a low-level keyed process function is applied to the window that
         //      WHEN the keyed process function opens it
-        //          initializes a VALUE STATE of TreeSet<String> called "nameSet"
+        //          initializes a VALUE STATE of TreeSet<String> called "nameSymbolTable"
         //          initializes a MAP STATE of
-        //            KEY of Tuple2: f0: String, f1: Instant
-        //            VALUE of Tuple7:
+        //            KEY of String
+        //            VALUE of LinkedPriorityQueue<Tuple7> ranked by f3 where Tuple7 is:
         //              f0: String
         //              f1: int
         //              f2: double
@@ -187,37 +185,16 @@ public class TimeSeriesAverageApp implements Callable<Integer> {
         //              f4: double
         //              f5: double
         //              f6: boolean
-        //            called "backfillState"
+        //            called "adj"
+        //          initializes the time series graph called "timeSeriesGraph"
         //      WHEN the keyed process function processes an element it
-        //          adds each f0: name: String into the VALUE STATE "nameSet"
-        //          adds each
-        //              KEY of Tuple2: f0: name: String, f3: event_timestamp: Instant
-        //              VALUE of Tuple7:
-        //                  f0: name: String
-        //                  f1: window_size: int
-        //                  f2: value: double
-        //                  f3: event_timestamp: Instant
-        //                  f4: aggregate_sum: double
-        //                  f5: aggregate_count double
-        //                  f6: is_backfill: boolean
-        //              to the MAP STATE "backfillState"
+        //          adds the value to the "timeSeriesGraph"
         //          fires an timer to occur at f3: event_timestamp: Instant + 15 minutes (at the end of a window)
         //      WHEN the keyed process functions coalesced timers are handled it
         //          calculates the current "event_time" to handle which is the timestamp - 15 minutes
-        //          iterates over each time series name in the "nameSet" for each "name":
-        //              IF MAP STATE "backfillState" contains a KEY of Tuple2: "name", "event_time" THEN
-        //                  collect the VALUE as an OUT result because it is not a back fill
-        //              ELSE
-        //                  the KEY of Tuple2: "name", "event_time" requires a back fill
-        //                  iterate over the MAP STATE "backfillState"
-        //                      filter the by "name" = Tuple2.f0
-        //                      filter by timestamp "event_time" > Tuple2.f1
-        //                      sort by key timestamp Tuple.f1 in ascending order
-        //                      collect into a List named "backfills"
-        //                  IF "backfills" is empty THEN there is no backfill
-        //                  ELSE
-        //                      the back fill is the last value in the list
-        //                      remove the other values in the list from MAP STATE "backfillState" as they are no longer needed
+        //          finds the elements in the "timeSeriesGraph" and collects them.
+        //              this has the side-affect of removing
+        //              values in the list from MAP STATE "adj" that are no longer needed.
         final DataStream<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>> backfilledAggregateTimeSeriesStream =
                 aggregateTimeSeriesStream.keyBy(1)
                         .process(
@@ -225,23 +202,25 @@ public class TimeSeriesAverageApp implements Callable<Integer> {
 
                                     private ValueState<Set<String>> nameSymbolTable;
 
-                                    private MapState<String, PriorityQueue<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>, Instant>> adj;
+                                    private MapState<String, LinkedPriorityQueue<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>, Instant>> adj;
+
+                                    private TimeSeriesGraph<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>, String, Instant> timeSeriesGraph;
 
                                     @Override
                                     public void open(Configuration parameters) {
-                                        MapStateDescriptor<String, PriorityQueue<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>, Instant>> backfillDescriptor =
+                                        MapStateDescriptor<String, LinkedPriorityQueue<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>, Instant>> adjacencyDescriptor =
                                                 new MapStateDescriptor<>(
                                                         "time-series-graph",
                                                         TypeInformation.of(String.class),
                                                         TypeInformation.of(new TypeHint<>() {})
                                                 );
 
-                                        adj = getRuntimeContext().getMapState(backfillDescriptor);
-
-                                        ValueStateDescriptor<Set<String>> namesDescriptor =
+                                        ValueStateDescriptor<Set<String>> nameSymbolTableDescriptor =
                                                 new ValueStateDescriptor<>("name-symbol-table", TypeInformation.of(new TypeHint<>() {}));
 
-                                        nameSymbolTable = getRuntimeContext().getState(namesDescriptor);
+                                        adj = getRuntimeContext().getMapState(adjacencyDescriptor);
+                                        nameSymbolTable = getRuntimeContext().getState(nameSymbolTableDescriptor);
+                                        timeSeriesGraph = new TimeSeriesGraph<>(nameSymbolTable, adj, tuple7 -> tuple7.f0, tuple7 -> tuple7.f3);
                                     }
 
                                     @Override
@@ -255,8 +234,6 @@ public class TimeSeriesAverageApp implements Callable<Integer> {
                                             nameSymbolTable.update(new TreeSet<>());
                                         }
 
-                                        nameSymbolTable.value().add(value.f0);
-
                                         final Instant evenTime = value.f3;
                                         final long timer = evenTime.toEpochMilli() + Time.minutes(15).toMilliseconds();
 
@@ -268,19 +245,8 @@ public class TimeSeriesAverageApp implements Callable<Integer> {
                                         );
                                         ctx.timerService().registerEventTimeTimer(timer);
 
-                                        final String currentKey = value.f0;
-                                        if (adj.contains(currentKey)) {
-                                            adj.get(currentKey).enqueue(value);
-                                        } else {
-                                            PriorityQueue<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>, Instant> list = new PriorityQueue<>(
-                                                    tuple7 -> tuple7.f3
-                                            );
-                                            list.enqueue(value);
+                                        timeSeriesGraph.add(value);
 
-                                            adj.put(currentKey, list);
-                                        }
-
-                                        logger.info("queue: {}", adj.get(currentKey));
                                     }
 
                                     @Override
@@ -292,43 +258,13 @@ public class TimeSeriesAverageApp implements Callable<Integer> {
 
                                         final Instant event_time = Instant.ofEpochMilli(timestamp).minus(15, ChronoUnit.MINUTES);
 
-                                        for (String name : nameSymbolTable.value()) {
-
-                                            if (adj.contains(name)) {
-                                                final PriorityQueue<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>, Instant> list = adj.get(name);
-                                                logger.info("search event_time: {}, list: {}", event_time, list);
-                                                final Optional<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>> value =
-                                                        list.findThenTruncate(event_time); //, ((tuple7, instant) -> tuple7.f3.compareTo(instant) <= 0)
-                                                logger.info("search result event_time: {}, value: {}, list: {}", event_time, value, list);
-                                                if (value.isEmpty()) {
-                                                    logger.info(
-                                                            "onTimer with key: {} timestamp: {}, event_time: {}, has no value for name: {}.",
-                                                            ctx.getCurrentKey(),
-                                                            Instant.ofEpochMilli(timestamp),
-                                                            event_time,
-                                                            name
-                                                    );
-                                                } else {
-                                                    final Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean> candidate = value.get();
-                                                    if (candidate.f3.equals(event_time)) {
-                                                        logger.info(
-                                                                "onTimer with key: {} timestamp: {}, event_time: {}, has value: {}",
-                                                                ctx.getCurrentKey(),
-                                                                Instant.ofEpochMilli(timestamp),
-                                                                event_time,
-                                                                value
-                                                        );
-                                                        out.collect(candidate);
-                                                    } else {
-                                                        final Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean> backfill = new Tuple7<>(
-                                                                candidate.f0, candidate.f1, candidate.f2, event_time, candidate.f4, candidate.f5, true
-                                                        );
-                                                        logger.info("onTimer with key: {} timestamp: {}, step: {}, has backfill: {}", ctx.getCurrentKey(), Instant.ofEpochMilli(timestamp), event_time, backfill);
-                                                        out.collect(backfill);
-                                                    }
-                                                }
-                                            }
-                                        }
+                                        timeSeriesGraph.findThenCutRemainder(
+                                                event_time,
+                                                out::collect,
+                                                (tuple7, t) -> new Tuple7<>(
+                                                    tuple7.f0, tuple7.f1, tuple7.f2, t, tuple7.f4, tuple7.f5, true
+                                                )
+                                        );
                                     }
                                 });
 
