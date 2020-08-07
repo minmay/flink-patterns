@@ -1,12 +1,10 @@
 package mvillalobos.flink.patterns.timeseries.average;
 
 import org.apache.flink.api.common.state.MapState;
-import org.apache.flink.api.common.state.ValueState;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.Optional;
-import java.util.Set;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -43,19 +41,13 @@ public class TimeSeriesGraph<S, N, T extends Comparable<T>> {
     private final Function<S, T> mapToTimestamp;
 
     /**
-     * Persistent data-structure that contains name symbols.
-     */
-    private final ValueState<Set<N>> nameSymbolTable;
-
-    /**
      * Persistent data-structure that contains adjacency list.
      */
     private final MapState<N, LinkedPriorityQueue<S, T>> adj;
 
-    public TimeSeriesGraph(ValueState<Set<N>> nameSymbolTable, MapState<N, LinkedPriorityQueue<S, T>> adj, Function<S, N> mapToNameSymbol, Function<S, T> mapToTimesamp) {
+    public TimeSeriesGraph(MapState<N, LinkedPriorityQueue<S, T>> adj, Function<S, N> mapToNameSymbol, Function<S, T> mapToTimesamp) {
         this.mapToNameSymbol = mapToNameSymbol;
         this.mapToTimestamp = mapToTimesamp;
-        this.nameSymbolTable = nameSymbolTable;
         this.adj = adj;
     }
 
@@ -68,7 +60,6 @@ public class TimeSeriesGraph<S, N, T extends Comparable<T>> {
     public void add(S value) throws Exception {
 
         final N name = mapToNameSymbol.apply(value);
-        nameSymbolTable.value().add(name);
 
         if (adj.contains(name)) {
             adj.get(name).enqueue(value);
@@ -112,7 +103,7 @@ public class TimeSeriesGraph<S, N, T extends Comparable<T>> {
      * @throws Exception When there is a persistence error.
      */
     public void findThenCutRemainder(T timestamp, Consumer<S> consumer, BiFunction<S, T, S> mapToBackFill) throws Exception {
-        for (N name : nameSymbolTable.value()) {
+        for (N name : adj.keys()) {
 
             if (adj.contains(name)) {
                 final LinkedPriorityQueue<S, T> list = adj.get(name);

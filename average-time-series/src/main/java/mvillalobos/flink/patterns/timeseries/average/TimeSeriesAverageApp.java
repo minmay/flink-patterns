@@ -3,8 +3,6 @@ package mvillalobos.flink.patterns.timeseries.average;
 import com.google.common.collect.ImmutableList;
 import org.apache.flink.api.common.state.MapState;
 import org.apache.flink.api.common.state.MapStateDescriptor;
-import org.apache.flink.api.common.state.ValueState;
-import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.api.common.typeinfo.TypeHint;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeinfo.Types;
@@ -39,8 +37,6 @@ import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
-import java.util.Set;
-import java.util.TreeSet;
 import java.util.concurrent.Callable;
 
 @CommandLine.Command(name = "Time Series Average", mixinStandardHelpOptions = true,
@@ -74,7 +70,7 @@ public class TimeSeriesAverageApp implements Callable<Integer> {
         // f3: event_timestamp: Instant
         // f4: aggregate_sum: double
         // f5: aggregate_count double
-        // f6: is_backfile: boolean
+        // f6: is_forward_fill: boolean
         // WHEN the map operation finishes
         // THEN the event time assigned using field f3
         final DataStream<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>> timeSeriesStream = env.readTextFile(inputFilePath)
@@ -106,7 +102,7 @@ public class TimeSeriesAverageApp implements Callable<Integer> {
         // f3: event_timestamp: Instant
         // f4: aggregate_sum: double
         // f5: aggregate_count double
-        // f6: is_backfill: boolean
+        // f6: is_forward_fill: boolean
         // THEN the stream is KEYED BY: f0: name:String, f1: window_size: int
         // THEN the stream is WINDOWED into a tumbling event time window of 15 minutes
         // THEN the window is configured to allow elements late by 1 hour
@@ -167,7 +163,7 @@ public class TimeSeriesAverageApp implements Callable<Integer> {
         // f3: event_timestamp: Instant
         // f4: aggregate_sum: double
         // f5: aggregate_count double
-        // f6: is_backfill: boolean
+        // f6: is_forward_fill: boolean
         // THAT was aggregated to compute the average on f2: value: double
         // WITH a grouping of: f0: name:String, f1: window_size: int
         // WITH a tumbling event time window of 15 minutes
@@ -200,8 +196,6 @@ public class TimeSeriesAverageApp implements Callable<Integer> {
                         .process(
                                 new KeyedProcessFunction<>() {
 
-                                    private ValueState<Set<String>> nameSymbolTable;
-
                                     private MapState<String, LinkedPriorityQueue<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>, Instant>> adj;
 
                                     private TimeSeriesGraph<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>, String, Instant> timeSeriesGraph;
@@ -215,12 +209,9 @@ public class TimeSeriesAverageApp implements Callable<Integer> {
                                                         TypeInformation.of(new TypeHint<>() {})
                                                 );
 
-                                        ValueStateDescriptor<Set<String>> nameSymbolTableDescriptor =
-                                                new ValueStateDescriptor<>("name-symbol-table", TypeInformation.of(new TypeHint<>() {}));
 
                                         adj = getRuntimeContext().getMapState(adjacencyDescriptor);
-                                        nameSymbolTable = getRuntimeContext().getState(nameSymbolTableDescriptor);
-                                        timeSeriesGraph = new TimeSeriesGraph<>(nameSymbolTable, adj, tuple7 -> tuple7.f0, tuple7 -> tuple7.f3);
+                                        timeSeriesGraph = new TimeSeriesGraph<>(adj, tuple7 -> tuple7.f0, tuple7 -> tuple7.f3);
                                     }
 
                                     @Override
@@ -229,10 +220,6 @@ public class TimeSeriesAverageApp implements Callable<Integer> {
                                             Context ctx,
                                             Collector<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>> out
                                     ) throws Exception {
-
-                                        if (nameSymbolTable.value() == null) {
-                                            nameSymbolTable.update(new TreeSet<>());
-                                        }
 
                                         final Instant evenTime = value.f3;
                                         final long timer = evenTime.toEpochMilli() + Time.minutes(15).toMilliseconds();
@@ -286,7 +273,7 @@ public class TimeSeriesAverageApp implements Callable<Integer> {
                         .field("event_timestamp", DataTypes.TIMESTAMP().notNull())
                         .field("aggregate_sum", DataTypes.DOUBLE().notNull())
                         .field("aggregate_count", DataTypes.INT().notNull())
-                        .field("is_backfill", DataTypes.BOOLEAN().notNull())
+                        .field("is_forward_fill", DataTypes.BOOLEAN().notNull())
                         .primaryKey("name", "window_size", "event_timestamp")
                         .build())
                 .build();
@@ -323,7 +310,7 @@ public class TimeSeriesAverageApp implements Callable<Integer> {
                         "    value DOUBLE PRECISION NOT NULL DEFAULT 0,\n" +
                         "    aggregate_sum DOUBLE PRECISION NOT NULL DEFAULT 0,\n" +
                         "    aggregate_count INTEGER NOT NULL DEFAULT 1,\n" +
-                        "    is_backfill BOOLEAN NOT NULL DEFAULT false,\n" +
+                        "    is_forward_fill BOOLEAN NOT NULL DEFAULT false,\n" +
                         "    version INTEGER NOT NULL DEFAULT 1,\n" +
                         "    create_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,\n" +
                         "    modify_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,\n" +
@@ -334,7 +321,7 @@ public class TimeSeriesAverageApp implements Callable<Integer> {
             exitCode = new CommandLine(new TimeSeriesAverageApp()).execute(args);
 
             try (final Statement stmt = con.createStatement()) {
-                final ResultSet rs = stmt.executeQuery("SELECT id, name, window_size, event_timestamp, value, aggregate_sum, aggregate_count, is_backfill, version, create_time, modify_time FROM time_series ORDER BY window_size, event_timestamp, name");
+                final ResultSet rs = stmt.executeQuery("SELECT id, name, window_size, event_timestamp, value, aggregate_sum, aggregate_count, is_forward_fill, version, create_time, modify_time FROM time_series ORDER BY window_size, event_timestamp, name");
                 while (rs.next()) {
                     final long id = rs.getLong(1);
                     final String name = rs.getString(2);
@@ -343,13 +330,13 @@ public class TimeSeriesAverageApp implements Callable<Integer> {
                     final double value = rs.getDouble(5);
                     final double aggregate_sum = rs.getDouble(6);
                     final int aggregate_count = rs.getInt(7);
-                    final boolean is_backfill = rs.getBoolean(8);
+                    final boolean is_forward_fill = rs.getBoolean(8);
                     final int version = rs.getInt(9);
                     final Timestamp create_time = rs.getTimestamp(10);
                     final Timestamp modify_time = rs.getTimestamp(11);
                     logger.info(
-                            "id: {}, name: \"{}\", window_size: {}, event_timestamp: \"{}\", value: {}, aggregate_sum: {}, aggregate_count: {}, is_backfill: {} version: {} create_time: \"{}\" modify_time: \"{}\"",
-                            id, name, window_size, event_timestamp, value, aggregate_sum, aggregate_count, is_backfill, version, create_time, modify_time
+                            "id: {}, name: \"{}\", window_size: {}, event_timestamp: \"{}\", value: {}, aggregate_sum: {}, aggregate_count: {}, is_forward_fill: {} version: {} create_time: \"{}\" modify_time: \"{}\"",
+                            id, name, window_size, event_timestamp, value, aggregate_sum, aggregate_count, is_forward_fill, version, create_time, modify_time
                     );
                 }
             }
