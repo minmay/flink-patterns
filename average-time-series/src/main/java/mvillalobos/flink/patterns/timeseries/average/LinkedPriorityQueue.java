@@ -12,13 +12,13 @@ import java.util.function.Function;
 public class LinkedPriorityQueue<T, F extends Comparable<F>> {
 
     /** Maps an instance into a priority. */
-    private final Function<T, F> mapToPriority;
+    private Function<T, F> mapToPriority;
 
     /** The head of the priority queue. */
     private Node<T> head = null;
 
     /** The number elements in this queue. */
-    private int n;
+    private int size;
 
     /**
      * Creates an instance of this priority queue.
@@ -59,7 +59,7 @@ public class LinkedPriorityQueue<T, F extends Comparable<F>> {
                 }
             }
         }
-        n++;
+        size++;
     }
 
     /**
@@ -86,12 +86,12 @@ public class LinkedPriorityQueue<T, F extends Comparable<F>> {
      */
     public  Optional<T> findThenTruncate(F priority) {
         Node<T> runner = head;
-        int counter = 0;
+        int counter = 1;
         while (runner != null) {
 
             if (mapToPriority.apply(runner.value).compareTo(priority) <= 0) {
                 runner.next = null;
-                n -= counter;
+                size -= counter;
                 return Optional.of(runner.value);
             }
             runner = runner.next;
@@ -113,7 +113,14 @@ public class LinkedPriorityQueue<T, F extends Comparable<F>> {
      * @return the size.
      */
     public int getSize() {
-        return n;
+        return size;
+    }
+
+    /**
+     * visible only for serialization
+     */
+    public void setSize(int size) {
+        this.size = size;
     }
 
     @Override
@@ -130,11 +137,30 @@ public class LinkedPriorityQueue<T, F extends Comparable<F>> {
         return builder.toString();
     }
 
+    public LinkedPriorityQueue() {
+    }
+
+    public Function<T, F> getMapToPriority() {
+        return mapToPriority;
+    }
+
+    public void setMapToPriority(Function<T, F> mapToPriority) {
+        this.mapToPriority = mapToPriority;
+    }
+
+    public Node<T> getHead() {
+        return head;
+    }
+
+    public void setHead(Node<T> head) {
+        this.head = head;
+    }
+
     /**
      * A node element in the priority queue.
      * @param <T> The type that contains a priority.
      */
-    private static class Node<T> {
+    public static class Node<T> {
 
         /** The node value. */
         private T value;
@@ -148,6 +174,25 @@ public class LinkedPriorityQueue<T, F extends Comparable<F>> {
          */
         public Node(T value) {
             this.value = value;
+        }
+
+        public Node() {
+        }
+
+        public T getValue() {
+            return value;
+        }
+
+        public void setValue(T value) {
+            this.value = value;
+        }
+
+        public Node<T> getNext() {
+            return next;
+        }
+
+        public void setNext(Node<T> next) {
+            this.next = next;
         }
     }
 }
