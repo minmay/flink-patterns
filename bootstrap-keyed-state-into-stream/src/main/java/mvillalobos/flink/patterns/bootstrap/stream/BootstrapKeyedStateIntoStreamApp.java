@@ -45,9 +45,19 @@ public class BootstrapKeyedStateIntoStreamApp implements Callable<Integer> {
     private transient File savePointPath;
 
     public Integer call() throws Exception {
-        bootstrap();
-        stream();
-        return 0;
+        try {
+            try {
+                bootstrap();
+            } catch (Exception e) {
+                logger.error("bootstrap failed..", e);
+                return -1;
+            }
+            stream();
+            return 0;
+        } catch (Exception e) {
+            logger.error("stream failed.", e);
+            return -2;
+        }
     }
 
     //writes dataset into a savepoint
@@ -63,9 +73,9 @@ public class BootstrapKeyedStateIntoStreamApp implements Callable<Integer> {
                             @Override
                             public Tuple3<String, String, String> map(Row row) throws Exception {
                                 return new Tuple3<String, String, String>(
-                                        (String) row.getField(0),
-                                        (String) row.getField(1),
-                                        (String) row.getField(2)
+                                        (String) row.getField(0),   // namespace
+                                        (String) row.getField(1),   // name
+                                        (String) row.getField(2)    // value
                                 );
                             }
                         }).returns(Types.TUPLE(Types.STRING, Types.STRING, Types.STRING))
@@ -79,6 +89,7 @@ public class BootstrapKeyedStateIntoStreamApp implements Callable<Integer> {
         Savepoint.create(new MemoryStateBackend(), 2)
                 .withOperator("boot-strap", bootstrapTransformation)
                 .write("file://" + savePointPath.getPath());
+
         batchEnv.execute("bootstrap demo");
     }
 
@@ -109,6 +120,8 @@ public class BootstrapKeyedStateIntoStreamApp implements Callable<Integer> {
         final String databaseURL = "jdbc:derby:memory:flink;create=true";
         int exitCode;
         try (final Connection con = DriverManager.getConnection(databaseURL)) {
+
+            // first create a database
             try (final Statement stmt = con.createStatement();) {
                 stmt.execute("CREATE TABLE configurations (\n" +
                         "    id INTEGER NOT NULL GENERATED ALWAYS AS IDENTITY (START WITH 1, INCREMENT BY 1),\n" +
@@ -122,6 +135,7 @@ public class BootstrapKeyedStateIntoStreamApp implements Callable<Integer> {
                         ")");
             }
 
+            // seed the database
             try (final PreparedStatement stmt = con.prepareStatement("INSERT INTO configurations (namespace, name, value) VALUES (?, ?, ?)")) {
                 for (int i = 0; i < 10; i++) {
                     stmt.setString(1, "evil-inc");
@@ -131,8 +145,10 @@ public class BootstrapKeyedStateIntoStreamApp implements Callable<Integer> {
                 }
             }
 
+            // run the flink job
             exitCode = new CommandLine(new BootstrapKeyedStateIntoStreamApp()).execute(args);
 
+            // find out what happened in the database
             if (exitCode == 0) {
                 try (final Statement stmt = con.createStatement()) {
                     final ResultSet rs = stmt.executeQuery("SELECT id, namespace, name, value, version, create_time, modify_time FROM configurations ORDER BY name");
