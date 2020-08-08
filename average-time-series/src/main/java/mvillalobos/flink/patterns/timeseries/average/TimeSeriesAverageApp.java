@@ -1,6 +1,8 @@
 package mvillalobos.flink.patterns.timeseries.average;
 
 import com.google.common.collect.ImmutableList;
+import org.apache.flink.api.common.state.MapState;
+import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.api.common.typeinfo.TypeHint;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.common.typeinfo.Types;
@@ -9,9 +11,11 @@ import org.apache.flink.api.java.io.jdbc.JDBCUpsertTableSink;
 import org.apache.flink.api.java.tuple.Tuple;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.tuple.Tuple7;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.TimeCharacteristic;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.streaming.api.functions.timestamps.AscendingTimestampExtractor;
 import org.apache.flink.streaming.api.functions.windowing.ProcessWindowFunction;
 import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows;
@@ -32,6 +36,7 @@ import java.sql.ResultSet;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.concurrent.Callable;
 
 @CommandLine.Command(name = "Time Series Average", mixinStandardHelpOptions = true,
@@ -65,7 +70,7 @@ public class TimeSeriesAverageApp implements Callable<Integer> {
         // f3: event_timestamp: Instant
         // f4: aggregate_sum: double
         // f5: aggregate_count double
-        // f6: is_backfile: boolean
+        // f6: is_forward_fill: boolean
         // WHEN the map operation finishes
         // THEN the event time assigned using field f3
         final DataStream<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>> timeSeriesStream = env.readTextFile(inputFilePath)
@@ -97,11 +102,11 @@ public class TimeSeriesAverageApp implements Callable<Integer> {
         // f3: event_timestamp: Instant
         // f4: aggregate_sum: double
         // f5: aggregate_count double
-        // f6: is_backfile: boolean
+        // f6: is_forward_fill: boolean
         // THEN the stream is KEYED BY: f0: name:String, f1: window_size: int
         // THEN the stream is WINDOWED into a tumbling event time window of 15 minutes
         // THEN the window is configured to allow elements late by 1 hour
-        // THEN a low-level process function is applied to the window that
+        // THEN a low-level process window function is applied to the window that
         //      aggregates the time series by assigning the following tuple fields:
         //      f1: window_size = 15 minutes in miliseconds
         //      f2: value = average value in this 15 minute window
@@ -145,11 +150,112 @@ public class TimeSeriesAverageApp implements Callable<Integer> {
                             aggregation.f2 = aggregation.f4 / aggregation.f5;
                         }
 
+                        logger.info("Added aggregation: {}", aggregation);
                         out.collect(aggregation);
                     }
                 }).name("averaged keyed tumbling window event time stream");
 
-        upsertToJDBC(jdbcUpsertTableSink, aggregateTimeSeriesStream);
+
+        // GIVEN a data-stream of tuple7
+        // f0: name: String
+        // f1: window_size: int
+        // f2: value: double
+        // f3: event_timestamp: Instant
+        // f4: aggregate_sum: double
+        // f5: aggregate_count double
+        // f6: is_forward_fill: boolean
+        // THAT was aggregated to compute the average on f2: value: double
+        // WITH a grouping of: f0: name:String, f1: window_size: int
+        // WITH a tumbling event time window of 15 minutes
+        // THEN the stream is KEYED BY: f1: window_size: int
+        // THEN a low-level keyed process function is applied to the window that
+        //      WHEN the keyed process function opens it
+        //          initializes a VALUE STATE of TreeSet<String> called "nameSymbolTable"
+        //          initializes a MAP STATE of
+        //            KEY of String
+        //            VALUE of LinkedPriorityQueue<Tuple7> ranked by f3 where Tuple7 is:
+        //              f0: String
+        //              f1: int
+        //              f2: double
+        //              f3: Instant
+        //              f4: double
+        //              f5: double
+        //              f6: boolean
+        //            called "adj"
+        //          initializes the time series graph called "timeSeriesGraph"
+        //      WHEN the keyed process function processes an element it
+        //          adds the value to the "timeSeriesGraph"
+        //          fires an timer to occur at f3: event_timestamp: Instant + 15 minutes (at the end of a window)
+        //      WHEN the keyed process functions coalesced timers are handled it
+        //          calculates the current "event_time" to handle which is the timestamp - 15 minutes
+        //          finds the elements in the "timeSeriesGraph" and collects them.
+        //              this has the side-affect of removing
+        //              values in the list from MAP STATE "adj" that are no longer needed.
+        final DataStream<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>> backfilledAggregateTimeSeriesStream =
+                aggregateTimeSeriesStream.keyBy(1)
+                        .process(
+                                new KeyedProcessFunction<>() {
+
+                                    private MapState<String, LinkedPriorityQueue<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>, Instant>> adj;
+
+                                    private TimeSeriesGraph<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>, String, Instant> timeSeriesGraph;
+
+                                    @Override
+                                    public void open(Configuration parameters) {
+                                        MapStateDescriptor<String, LinkedPriorityQueue<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>, Instant>> adjacencyDescriptor =
+                                                new MapStateDescriptor<>(
+                                                        "time-series-graph",
+                                                        TypeInformation.of(String.class),
+                                                        TypeInformation.of(new TypeHint<>() {})
+                                                );
+
+
+                                        adj = getRuntimeContext().getMapState(adjacencyDescriptor);
+                                        timeSeriesGraph = new TimeSeriesGraph<>(adj, tuple7 -> tuple7.f0, tuple7 -> tuple7.f3);
+                                    }
+
+                                    @Override
+                                    public void processElement(
+                                            Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean> value,
+                                            Context ctx,
+                                            Collector<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>> out
+                                    ) throws Exception {
+
+                                        final Instant evenTime = value.f3;
+                                        final long timer = evenTime.toEpochMilli() + Time.minutes(15).toMilliseconds();
+
+                                        logger.info(
+                                                "processElement with key: {}, value: {}.  registering timer: {}",
+                                                ctx.getCurrentKey(),
+                                                value,
+                                                Instant.ofEpochMilli(timer)
+                                        );
+                                        ctx.timerService().registerEventTimeTimer(timer);
+
+                                        timeSeriesGraph.add(value);
+
+                                    }
+
+                                    @Override
+                                    public void onTimer(
+                                            long timestamp,
+                                            OnTimerContext ctx,
+                                            Collector<Tuple7<String, Integer, Double, Instant, Double, Integer, Boolean>> out
+                                    ) throws Exception {
+
+                                        final Instant event_time = Instant.ofEpochMilli(timestamp).minus(15, ChronoUnit.MINUTES);
+
+                                        timeSeriesGraph.findThenCutRemainder(
+                                                event_time,
+                                                out::collect,
+                                                (tuple7, t) -> new Tuple7<>(
+                                                    tuple7.f0, tuple7.f1, tuple7.f2, t, tuple7.f4, tuple7.f5, true
+                                                )
+                                        );
+                                    }
+                                });
+
+        upsertToJDBC(jdbcUpsertTableSink, backfilledAggregateTimeSeriesStream);
 
         env.execute("time series");
     }
@@ -167,7 +273,7 @@ public class TimeSeriesAverageApp implements Callable<Integer> {
                         .field("event_timestamp", DataTypes.TIMESTAMP().notNull())
                         .field("aggregate_sum", DataTypes.DOUBLE().notNull())
                         .field("aggregate_count", DataTypes.INT().notNull())
-                        .field("is_backfill", DataTypes.BOOLEAN().notNull())
+                        .field("is_forward_fill", DataTypes.BOOLEAN().notNull())
                         .primaryKey("name", "window_size", "event_timestamp")
                         .build())
                 .build();
@@ -204,7 +310,7 @@ public class TimeSeriesAverageApp implements Callable<Integer> {
                         "    value DOUBLE PRECISION NOT NULL DEFAULT 0,\n" +
                         "    aggregate_sum DOUBLE PRECISION NOT NULL DEFAULT 0,\n" +
                         "    aggregate_count INTEGER NOT NULL DEFAULT 1,\n" +
-                        "    is_backfill BOOLEAN NOT NULL DEFAULT false,\n" +
+                        "    is_forward_fill BOOLEAN NOT NULL DEFAULT false,\n" +
                         "    version INTEGER NOT NULL DEFAULT 1,\n" +
                         "    create_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,\n" +
                         "    modify_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,\n" +
@@ -215,7 +321,7 @@ public class TimeSeriesAverageApp implements Callable<Integer> {
             exitCode = new CommandLine(new TimeSeriesAverageApp()).execute(args);
 
             try (final Statement stmt = con.createStatement()) {
-                final ResultSet rs = stmt.executeQuery("SELECT id, name, window_size, event_timestamp, value, aggregate_sum, aggregate_count, is_backfill, version, create_time, modify_time FROM time_series");
+                final ResultSet rs = stmt.executeQuery("SELECT id, name, window_size, event_timestamp, value, aggregate_sum, aggregate_count, is_forward_fill, version, create_time, modify_time FROM time_series ORDER BY window_size, event_timestamp, name");
                 while (rs.next()) {
                     final long id = rs.getLong(1);
                     final String name = rs.getString(2);
@@ -224,13 +330,13 @@ public class TimeSeriesAverageApp implements Callable<Integer> {
                     final double value = rs.getDouble(5);
                     final double aggregate_sum = rs.getDouble(6);
                     final int aggregate_count = rs.getInt(7);
-                    final boolean is_backfill = rs.getBoolean(8);
+                    final boolean is_forward_fill = rs.getBoolean(8);
                     final int version = rs.getInt(9);
                     final Timestamp create_time = rs.getTimestamp(10);
                     final Timestamp modify_time = rs.getTimestamp(11);
                     logger.info(
-                            "id: {}, name: \"{}\", window_size: {}, event_timestamp: \"{}\", value: {}, aggregate_sum: {}, aggregate_count: {}, is_backfill: {} version: {} create_time: \"{}\" modify_time: \"{}\"",
-                            id, name, window_size, event_timestamp, value, aggregate_sum, aggregate_count, is_backfill, version, create_time, modify_time
+                            "id: {}, name: \"{}\", window_size: {}, event_timestamp: \"{}\", value: {}, aggregate_sum: {}, aggregate_count: {}, is_forward_fill: {} version: {} create_time: \"{}\" modify_time: \"{}\"",
+                            id, name, window_size, event_timestamp, value, aggregate_sum, aggregate_count, is_forward_fill, version, create_time, modify_time
                     );
                 }
             }
