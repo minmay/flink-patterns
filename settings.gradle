@@ -1,3 +1,4 @@
 rootProject.name = 'flink-patterns'
 
 include 'average-time-series'
+include 'bootstrap-keyed-state-into-stream'
