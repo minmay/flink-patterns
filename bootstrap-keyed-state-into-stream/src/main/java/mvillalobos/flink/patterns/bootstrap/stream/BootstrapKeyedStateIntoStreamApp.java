@@ -49,7 +49,7 @@ public class BootstrapKeyedStateIntoStreamApp implements Callable<Integer> {
             try {
                 bootstrap();
             } catch (Exception e) {
-                logger.error("bootstrap failed..", e);
+                logger.error("bootstrap failed.", e);
                 return -1;
             }
             stream();
