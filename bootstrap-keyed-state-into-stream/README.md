@@ -12,7 +12,7 @@ documentation states that "you can read a batch of data from any store, preproce
 Kartik Khare in his [blog](https://www.kharekartik.dev/2019/12/14/bootstrap-your-flink-jobs/) wrote that 
 "You can create both Batch and Stream environment in a single job."
 
-However, I have yet to find a working example that shows how to do both.
+However, I have yet to find a working example that shows how to do both. I wrote a solution.
 
 ## Run with Docker Compose
 
@@ -20,12 +20,23 @@ However, I have yet to find a working example that shows how to do both.
 2. ```cd flink-patterns```
 3. ```docker-compose up```
 
-Please note that this approach works.
+## Solution Notes
 
-## Run with JDK 11
+As of August 10, 2020, Amazon EMR only supports Flink 1.10.1 and JDK 8. It was imperative that my solution 
+works with that environment.
 
-1. ```git clone https://github.com/minmay/flink-patterns.git```
-2. ```cd flink-patterns```
-3. ```./gradlew  :bootstrap-keyed-state-into-stream:run```
+Initially, I tried to solve this problem locally, but I but I believe that there is a bug in saving Keyed State
+within the ```KeyedStateBootstrapFunction``` when run locally (ie in an IDE). Thus, the only way
+I got this to work was by deploying to an actual cluster. My code shows how to deploy and submit jobs
+to a cluster within docker-compose. I customized the Flink Docker image use JDK 8 (instead of JRE) so 
+that I could use the Flink command-line tool within my Docker images (if anybody knows of a better
+way of doing this, please let me know).
 
-Please note that this approach fails.
+1. run the "write bootstrap" batch job in Flink that programmatically writes a save point. In my code, that is that
+that path use the ```void bootstrap()``` method.
+2. after, run the "read bootstrap" stream job with the -s parameter to load the savepoint that was written by the
+"write bootstrap" job (please note, I think none of the documentation, nor the blogs were explicit in detailing
+to a Flink beginner that the load save point has to be explicitly declared in the start up command line parameters
+when submitting the job. I hope to find a way to programmatically load a save point.
+3. I opened a volume in Docker that is shared by jobmanager, taskmanager, and Flink job. My Flink job
+run script created this directory, and this is where it saves and reads the save point.   

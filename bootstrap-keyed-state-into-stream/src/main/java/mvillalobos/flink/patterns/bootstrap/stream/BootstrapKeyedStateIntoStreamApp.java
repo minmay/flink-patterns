@@ -20,7 +20,13 @@ import org.apache.flink.state.api.BootstrapTransformation;
 import org.apache.flink.state.api.OperatorTransformation;
 import org.apache.flink.state.api.Savepoint;
 import org.apache.flink.state.api.functions.KeyedStateBootstrapFunction;
+import org.apache.flink.streaming.api.TimeCharacteristic;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.datastream.DataStreamSource;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.types.Row;
+import org.apache.flink.util.Collector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import picocli.CommandLine;
@@ -33,6 +39,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.sql.Timestamp;
+import java.util.Map;
 import java.util.concurrent.Callable;
 
 @CommandLine.Command(name = "Boot Strap Keyed State into Stream", mixinStandardHelpOptions = true,
@@ -41,10 +48,20 @@ public class BootstrapKeyedStateIntoStreamApp implements Callable<Integer> {
 
     private final static Logger logger = LoggerFactory.getLogger(BootstrapKeyedStateIntoStreamApp.class);
 
+    public static final String BOOT_STRAP_OPERATOR_NAME = "boot-strap";
+
+    public enum Bootsrap {
+        read,
+        write;
+    }
+
+    @CommandLine.Option(names = {"-b", "--bootstrap",}, description = "Runs an embedded database.", required = true)
+    private transient Bootsrap bootsrap;
+
     @CommandLine.Option(names = {"-e", "--run-embedded",}, description = "Runs an embedded database.")
     private transient boolean runEmbedded = false;
 
-    @CommandLine.Option(names = {"-s", "--save-point-path"}, description = "The save point path.", required = true)
+    @CommandLine.Option(names = {"-s", "--save-point-path"}, description = "The save point path.")
     private transient File savePointPath;
 
     @CommandLine.Option(names = {"--jdbc-driver",}, description = "The jdbc password.")
@@ -62,13 +79,18 @@ public class BootstrapKeyedStateIntoStreamApp implements Callable<Integer> {
 
     public Integer call() throws Exception {
         try {
+
             try {
-                bootstrap();
+                if (bootsrap == Bootsrap.write) {
+                    bootstrap();
+                }
             } catch (Exception e) {
                 logger.error("bootstrap failed.", e);
                 return -1;
             }
-            stream();
+            if (bootsrap == Bootsrap.read) {
+                stream();
+            }
             return 0;
         } catch (Exception e) {
             logger.error("stream failed.", e);
@@ -103,15 +125,27 @@ public class BootstrapKeyedStateIntoStreamApp implements Callable<Integer> {
                 .transform(new ConfigurationKeyedStateBootstrapFunction());
 
         Savepoint.create(new MemoryStateBackend(), 2)
-                .withOperator("boot-strap", bootstrapTransformation)
+                .withOperator(BOOT_STRAP_OPERATOR_NAME, bootstrapTransformation)
                 .write("file://" + savePointPath.getPath());
 
-        batchEnv.execute("bootstrap demo");
+        batchEnv.execute("write bootstrap");
     }
 
-    //TODO while processing a stream this will use the keyed state written by bootstrap
-    public void stream() {
+    public void stream() throws Exception {
+        final StreamExecutionEnvironment streamEnv = StreamExecutionEnvironment.getExecutionEnvironment();
+        streamEnv.setStreamTimeCharacteristic(TimeCharacteristic.ProcessingTime);
 
+        final DataStreamSource<Tuple3<String, String, String>> source = streamEnv.fromElements(new Tuple3<String, String, String>("evil-inc", "source", "source"));
+        final DataStream<Tuple3<String, String, String>> bootstrapValues = source
+                .keyBy(0)
+                .process(new ReadLastValuesKeyedProcessFunction())
+                .uid(BOOT_STRAP_OPERATOR_NAME)
+                .name(BOOT_STRAP_OPERATOR_NAME)
+                .returns(TypeInformation.of(new TypeHint<Tuple3<String, String, String>>() {}));
+
+        bootstrapValues.print();
+
+        streamEnv.execute("read bootstrap");
     }
 
     private JDBCInputFormat buildBootStrapJdbcInputFormat(String namespace) {
@@ -234,7 +268,8 @@ public class BootstrapKeyedStateIntoStreamApp implements Callable<Integer> {
 
         @Override
         public void open(Configuration parameters) throws Exception {
-            MapStateDescriptor<String, Tuple3<String, String, String>> descriptor =
+            super.open(parameters);
+            final MapStateDescriptor<String, Tuple3<String, String, String>> descriptor =
                     new MapStateDescriptor<String, Tuple3<String, String, String>>(
                             "bootstrap-data",
                             Types.STRING,
@@ -252,4 +287,39 @@ public class BootstrapKeyedStateIntoStreamApp implements Callable<Integer> {
             lastValues.put(value.f1, value);
         }
     }
+
+    public static class ReadLastValuesKeyedProcessFunction extends KeyedProcessFunction<Tuple, Tuple3<String, String, String>, Tuple3<String, String, String>> {
+
+        private transient MapState<String, Tuple3<String, String, String>> lastValues;
+
+        @Override
+        public void open(Configuration parameters) throws Exception {
+            super.open(parameters);
+            final MapStateDescriptor<String, Tuple3<String, String, String>> descriptor =
+                    new MapStateDescriptor<String, Tuple3<String, String, String>>(
+                            "bootstrap-data",
+                            Types.STRING,
+                            TypeInformation.of(new TypeHint<Tuple3<String, String, String>>() {
+                            })
+                    );
+
+            lastValues = getRuntimeContext().getMapState(descriptor);
+        }
+
+        @Override
+        public void processElement(Tuple3<String, String, String> value, Context ctx, Collector<Tuple3<String, String, String>> out) throws Exception {
+            logger.info("processing element: {}", value);
+
+            if (lastValues.isEmpty()) {
+                logger.info("no last values found.");
+            } else {
+                for (Map.Entry<String, Tuple3<String, String, String>> entry : lastValues.entries()) {
+                    final Tuple3<String, String, String> lastValue = entry.getValue();
+                    logger.info("found last value: {}", lastValue);
+                    out.collect(lastValue);
+                }
+            }
+        }
+    }
+
 }
