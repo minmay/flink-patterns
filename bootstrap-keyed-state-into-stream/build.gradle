@@ -35,7 +35,6 @@ dependencyManagement {
         dependency "org.apache.flink:flink-table-api-java-bridge_${scalaBinaryVersion}:${flinkVersion}"
         dependency "org.apache.flink:flink-table-planner-blink_${scalaBinaryVersion}:${flinkVersion}"
         dependency "org.apache.flink:flink-jdbc_${scalaBinaryVersion}:${flinkVersion}"
-        // dependency "org.apache.flink:flink-connector-jdbc_${scalaBinaryVersion}:${flinkVersion}"
         dependency "org.apache.flink:flink-clients_${scalaBinaryVersion}:${flinkVersion}"
         dependency "org.apache.flink:flink-state-processor-api_${scalaBinaryVersion}:${flinkVersion}"
         dependency 'com.google.guava:guava:23.0'
@@ -54,14 +53,11 @@ dependencies {
     implementation "org.apache.flink:flink-table-api-java-bridge_${scalaBinaryVersion}"
     implementation "org.apache.flink:flink-table-planner-blink_${scalaBinaryVersion}"
     implementation "org.apache.flink:flink-jdbc_${scalaBinaryVersion}"
-//    implementation "org.apache.flink:flink-connector-jdbc_${scalaBinaryVersion}"
     implementation "org.apache.flink:flink-clients_${scalaBinaryVersion}"
     implementation "org.apache.flink:flink-state-processor-api_${scalaBinaryVersion}"
 
     implementation 'com.google.guava:guava'
-    implementation 'org.apache.derby:derby'
     implementation 'org.postgresql:postgresql'
-
     implementation "info.picocli:picocli"
 
     testRuntimeOnly 'org.junit.jupiter:junit-jupiter-engine'

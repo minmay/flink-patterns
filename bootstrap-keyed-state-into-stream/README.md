@@ -39,4 +39,7 @@ that path use the ```void bootstrap()``` method.
 to a Flink beginner that the load save point has to be explicitly declared in the start up command line parameters
 when submitting the job. I hope to find a way to programmatically load a save point.
 3. I opened a volume in Docker that is shared by jobmanager, taskmanager, and Flink job. My Flink job
-run script created this directory, and this is where it saves and reads the save point.   
+run script created this directory, and this is where it saves and reads the save point.
+
+If you run this repetitively, you might want to clear the save points by removing the volumn.
+```docker-compose down -v``` will remove the volume.   
