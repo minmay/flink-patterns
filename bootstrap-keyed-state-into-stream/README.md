@@ -14,15 +14,18 @@ Kartik Khare in his [blog](https://www.kharekartik.dev/2019/12/14/bootstrap-your
 
 However, I have yet to find a working example that shows how to do both.
 
-## Run with Docker
+## Run with Docker Compose
 
 1. ```git clone https://github.com/minmay/flink-patterns.git```
 2. ```cd flink-patterns```
-3. ```docker build -t mvillalobos/flink-patterns/bootstrap-keyed-state-into-stream:latest bootstrap-keyed-state-into-stream```
-4. ```docker run mvillalobos/flink-patterns/bootstrap-keyed-state-into-stream:latest```
+3. ```docker-compose up```
+
+Please note that this approach works.
 
 ## Run with JDK 11
 
 1. ```git clone https://github.com/minmay/flink-patterns.git```
 2. ```cd flink-patterns```
 3. ```./gradlew  :bootstrap-keyed-state-into-stream:run```
+
+Please note that this approach fails.

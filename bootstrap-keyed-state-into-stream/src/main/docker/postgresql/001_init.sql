@@ -1,0 +1,10 @@
+CREATE TABLE configurations (
+    id serial PRIMARY KEY,
+    namespace VARCHAR(50) NOT NULL,
+    name VARCHAR(50) NOT NULL,
+    value VARCHAR(50) NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    create_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    modify_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (name)
+)

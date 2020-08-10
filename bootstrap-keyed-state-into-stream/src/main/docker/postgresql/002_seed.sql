@@ -1,0 +1,10 @@
+INSERT INTO configurations (namespace, name, value) VALUES ('evil-inc', 'akb-0', 0);
+INSERT INTO configurations (namespace, name, value) VALUES ('evil-inc', 'akb-1', 1);
+INSERT INTO configurations (namespace, name, value) VALUES ('evil-inc', 'akb-2', 2);
+INSERT INTO configurations (namespace, name, value) VALUES ('evil-inc', 'akb-3', 3);
+INSERT INTO configurations (namespace, name, value) VALUES ('evil-inc', 'akb-4', 4);
+INSERT INTO configurations (namespace, name, value) VALUES ('evil-inc', 'akb-5', 5);
+INSERT INTO configurations (namespace, name, value) VALUES ('evil-inc', 'akb-6', 6);
+INSERT INTO configurations (namespace, name, value) VALUES ('evil-inc', 'akb-7', 7);
+INSERT INTO configurations (namespace, name, value) VALUES ('evil-inc', 'akb-8', 8);
+INSERT INTO configurations (namespace, name, value) VALUES ('evil-inc', 'akb-9', 9);
