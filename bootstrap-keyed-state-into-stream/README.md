@@ -17,7 +17,7 @@ However, I have yet to find a working example that shows how to do both. I wrote
 ## Run with Docker Compose
 
 1. ```git clone https://github.com/minmay/flink-patterns.git```
-2. ```cd flink-patterns```
+2. ```cd flink-patterns/bootstrap-keyed-state-into-stream```
 3. ```docker-compose up```
 
 ## Solution Notes
