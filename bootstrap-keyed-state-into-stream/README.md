@@ -28,7 +28,7 @@ works with that environment.
 Initially, I tried to solve this problem locally, but I but I believe that there is a bug in saving Keyed State
 within the ```KeyedStateBootstrapFunction``` when run locally (ie in an IDE). Thus, the only way
 I got this to work was by deploying to an actual cluster. My code shows how to deploy and submit jobs
-to a cluster within docker-compose. I customized the Flink Docker image use JDK 8 (instead of JRE) so 
+to a cluster within docker-compose. I customized the Flink Docker image to use JDK 8 (instead of JRE) so 
 that I could use the Flink command-line tool within my Docker images (if anybody knows of a better
 way of doing this, please let me know).
 
@@ -37,7 +37,7 @@ that path use the ```void bootstrap()``` method.
 2. after, run the "read bootstrap" stream job with the -s parameter to load the savepoint that was written by the
 "write bootstrap" job (please note, I think none of the documentation, nor the blogs were explicit in detailing
 to a Flink beginner that the load save point has to be explicitly declared in the start up command line parameters
-when submitting the job. I hope to find a way to programmatically load a save point.
+when submitting the job. I hope to find a way to programmatically load a save point).
 3. I opened a volume in Docker that is shared by jobmanager, taskmanager, and Flink job. My Flink job
 run script created this directory, and this is where it saves and reads the save point.
 
